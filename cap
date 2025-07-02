@@ -1,125 +1,218 @@
-import heapq
+# phishing_detector.py
+import re
+import sqlite3
+import joblib
+import pandas as pd
+import numpy as np
+from pathlib import Path
+from email import policy
+from email.parser import BytesParser
+from sklearn.pipeline import Pipeline
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import train_test_split
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics import classification_report, accuracy_score
+import nltk
+from nltk.corpus import stopwords
+from nltk.tokenize import word_tokenize
+from nltk.stem import WordNetLemmatizer
 
-# Process class to store details about each process
-class Process:
-    def __init__(self, pid, arrival_time, burst_time, memory_required):
-        self.pid = pid
-        self.arrival_time = arrival_time
-        self.burst_time = burst_time
-        self.memory_required = memory_required
-        self.start_time = None
-        self.completion_time = None
+# Download NLTK resources
+nltk.download('punkt')
+nltk.download('stopwords')
+nltk.download('wordnet')
 
-# Memory Manager class for handling memory allocation and deallocation
-class MemoryManager:
-    def __init__(self, memory_size):
-        self.memory_size = memory_size
-        self.allocated = set()
-
-    def allocate(self, process, strategy):
-        if self.memory_size >= process.memory_required:
-            self.allocated.add(process.pid)
-            self.memory_size -= process.memory_required
-            return True
-        return False
-
-    def deallocate(self, pid):
-        self.allocated.remove(pid)
-        self.memory_size += next(p.memory_required for p in process_list if p.pid == pid)
-
-# Scheduler class for FCFS and SJF scheduling
-class Scheduler:
-    def __init__(self, memory_size, strategy):
-        self.memory_size = memory_size
-        self.strategy = strategy
-        self.memory_manager = MemoryManager(memory_size)
-
-    def simulate_fcfs(self, processes):
-        time = 0
-        completed = []
-        skipped = set()
-        queue = []
-        i = 0
-
-        while len(completed) + len(skipped) < len(processes):
-            while i < len(processes) and processes[i].arrival_time <= time:
-                queue.append(processes[i])
-                i += 1
-            if queue:
-                p = queue.pop(0)  # FCFS is based on arrival time, not burst time
-                if not self.memory_manager.allocate(p, self.strategy):
-                    print(f"Process {p.pid} skipped due to insufficient memory.")
-                    skipped.add(p.pid)
-                    continue
-                p.start_time = time
-                time += p.burst_time
-                p.completion_time = time
-                self.memory_manager.deallocate(p.pid)
-                completed.append(p)
+class PhishingDetector:
+    def __init__(self, db_path='phishing_db.db', model_path='phishing_model.pkl'):
+        self.db_path = db_path
+        self.model_path = model_path
+        self.lemmatizer = WordNetLemmatizer()
+        self.stop_words = set(stopwords.words('english'))
+        self.model = None
+        self._init_db()
+        
+    def _init_db(self):
+        """Initialize SQLite database"""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS emails (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    content TEXT,
+                    is_phishing INTEGER,
+                    prediction INTEGER,
+                    confidence REAL,
+                    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS detections (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    email_id INTEGER,
+                    features TEXT,
+                    FOREIGN KEY(email_id) REFERENCES emails(id)
+                )
+            ''')
+            conn.commit()
+    
+    def _clean_text(self, text):
+        """Clean and preprocess text"""
+        # Remove URLs
+        text = re.sub(r'http\S+|www\S+|https\S+', '', text, flags=re.MULTILINE)
+        # Remove email addresses
+        text = re.sub(r'\S+@\S+', '', text)
+        # Remove special characters
+        text = re.sub(r'[^\w\s]', '', text)
+        # Convert to lowercase
+        text = text.lower()
+        # Tokenize and lemmatize
+        tokens = word_tokenize(text)
+        tokens = [self.lemmatizer.lemmatize(token) for token in tokens if token not in self.stop_words]
+        return ' '.join(tokens)
+    
+    def _parse_email(self, email_content):
+        """Parse email content and extract text"""
+        try:
+            msg = BytesParser(policy=policy.default).parsebytes(email_content.encode())
+            text = ""
+            
+            if msg.is_multipart():
+                for part in msg.walk():
+                    content_type = part.get_content_type()
+                    if content_type == 'text/plain':
+                        text += part.get_payload()
             else:
-                time += 1
-        return completed
+                text = msg.get_payload()
+                
+            return self._clean_text(text)
+        except Exception as e:
+            print(f"Error parsing email: {e}")
+            return ""
+    
+    def train_model(self, data_path, test_size=0.2, random_state=42):
+        """Train the phishing detection model"""
+        # Load and prepare data
+        df = pd.read_csv(data_path)
+        df['clean_text'] = df['content'].apply(self._parse_email)
+        
+        # Split data
+        X_train, X_test, y_train, y_test = train_test_split(
+            df['clean_text'], df['is_phishing'], 
+            test_size=test_size, random_state=random_state
+        )
+        
+        # Create pipeline
+        self.model = Pipeline([
+            ('tfidf', TfidfVectorizer(max_features=5000, ngram_range=(1, 2))),
+            ('clf', RandomForestClassifier(n_estimators=100, random_state=42))
+        ])
+        
+        # Train model
+        self.model.fit(X_train, y_train)
+        
+        # Evaluate
+        y_pred = self.model.predict(X_test)
+        print("Model Evaluation:")
+        print(classification_report(y_test, y_pred))
+        print(f"Accuracy: {accuracy_score(y_test, y_pred):.2f}")
+        
+        # Save model
+        joblib.dump(self.model, self.model_path)
+        print(f"Model saved to {self.model_path}")
+        
+        return self.model
+    
+    def load_model(self):
+        """Load trained model from file"""
+        if Path(self.model_path).exists():
+            self.model = joblib.load(self.model_path)
+            return self.model
+        else:
+            raise FileNotFoundError(f"Model file {self.model_path} not found. Train a model first.")
+    
+    def predict_email(self, email_content):
+        """Predict if an email is phishing"""
+        if not self.model:
+            self.load_model()
+        
+        clean_text = self._parse_email(email_content)
+        if not clean_text:
+            return False, 0.0
+        
+        proba = self.model.predict_proba([clean_text])[0]
+        prediction = self.model.predict([clean_text])[0]
+        confidence = proba[1] if prediction else proba[0]
+        
+        # Store results in database
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                INSERT INTO emails (content, is_phishing, prediction, confidence)
+                VALUES (?, ?, ?, ?)
+            ''', (email_content, None, int(prediction), float(confidence)))
+            email_id = cursor.lastrowid
+            
+            # Get features (for demonstration)
+            features = self.model.named_steps['tfidf'].transform([clean_text])
+            features_str = str(features.toarray()[0])
+            
+            cursor.execute('''
+                INSERT INTO detections (email_id, features)
+                VALUES (?, ?)
+            ''', (email_id, features_str))
+            conn.commit()
+        
+        return bool(prediction), float(confidence)
+    
+    def get_detection_history(self, limit=10):
+        """Get detection history from database"""
+        with sqlite3.connect(self.db_path) as conn:
+            df = pd.read_sql('''
+                SELECT e.id, e.timestamp, e.prediction, e.confidence, 
+                       substr(e.content, 1, 50) || '...' as preview
+                FROM emails e
+                ORDER BY e.timestamp DESC
+                LIMIT ?
+            ''', conn, params=(limit,))
+        return df
 
-    def simulate_sjf(self, processes):
-        time = 0
-        completed = []
-        skipped = set()
-        queue = []
-        i = 0
+def main():
+    import argparse
+    
+    parser = argparse.ArgumentParser(description="Phishing Email Detection System")
+    subparsers = parser.add_subparsers(dest='command', required=True)
+    
+    # Train command
+    train_parser = subparsers.add_parser('train', help='Train the phishing detection model')
+    train_parser.add_argument('--data', required=True, help='Path to training data CSV')
+    
+    # Predict command
+    predict_parser = subparsers.add_parser('predict', help='Predict if an email is phishing')
+    predict_parser.add_argument('--email', required=True, help='Email content or path to email file')
+    
+    # History command
+    history_parser = subparsers.add_parser('history', help='Show detection history')
+    history_parser.add_argument('--limit', type=int, default=10, help='Number of records to show')
+    
+    args = parser.parse_args()
+    detector = PhishingDetector()
+    
+    if args.command == 'train':
+        detector.train_model(args.data)
+    elif args.command == 'predict':
+        # Check if argument is a file path
+        if Path(args.email).exists():
+            with open(args.email, 'r') as f:
+                email_content = f.read()
+        else:
+            email_content = args.email
+        
+        is_phishing, confidence = detector.predict_email(email_content)
+        print(f"Prediction: {'Phishing' if is_phishing else 'Legitimate'}")
+        print(f"Confidence: {confidence:.2f}")
+    elif args.command == 'history':
+        history = detector.get_detection_history(args.limit)
+        print(history.to_string(index=False))
 
-        while len(completed) + len(skipped) < len(processes):
-            while i < len(processes) and processes[i].arrival_time <= time:
-                heapq.heappush(queue, (processes[i].burst_time, processes[i]))
-                i += 1
-            if queue:
-                _, p = heapq.heappop(queue)  # SJF is based on burst time (shortest first)
-                if not self.memory_manager.allocate(p, self.strategy):
-                    print(f"Process {p.pid} skipped due to insufficient memory.")
-                    skipped.add(p.pid)
-                    continue
-                p.start_time = time
-                time += p.burst_time
-                p.completion_time = time
-                self.memory_manager.deallocate(p.pid)
-                completed.append(p)
-            else:
-                time += 1
-        return completed
-
-# Function to calculate and print waiting and turnaround times
-def calculate_metrics(processes):
-    total_waiting = 0
-    total_turnaround = 0
-
-    for p in processes:
-        turnaround = p.completion_time - p.arrival_time
-        waiting = turnaround - p.burst_time
-        total_turnaround += turnaround
-        total_waiting += waiting
-        print(f"Process {p.pid}: Waiting Time = {waiting}, Turnaround Time = {turnaround}")
-
-    n = len(processes)
-    print(f"\nAverage Waiting Time: {total_waiting / n:.2f}")
-    print(f"Average Turnaround Time: {total_turnaround / n:.2f}")
-
-# Example usage
-if __name__ == "__main__":
-    # List of processes
-    process_list = [
-        Process(pid=1, arrival_time=0, burst_time=5, memory_required=100),
-        Process(pid=2, arrival_time=2, burst_time=3, memory_required=150),
-        Process(pid=3, arrival_time=4, burst_time=1, memory_required=200),
-        Process(pid=4, arrival_time=6, burst_time=7, memory_required=100)
-    ]
-
-    # FCFS Scheduling
-    scheduler = Scheduler(memory_size=500, strategy='first_fit')
-    print("=== FCFS Scheduling ===")
-    completed_fcfs = scheduler.simulate_fcfs(process_list.copy())
-    calculate_metrics(completed_fcfs)
-
-    # SJF Scheduling
-    scheduler = Scheduler(memory_size=500, strategy='best_fit')
-    print("\n=== SJF Scheduling ===")
-    completed_sjf = scheduler.simulate_sjf(process_list.copy())
-    calculate_metrics(completed_sjf)
+if __name__ == '__main__':
+    main()
