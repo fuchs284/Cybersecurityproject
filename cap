@@ -1,0 +1,125 @@
+import heapq
+
+# Process class to store details about each process
+class Process:
+    def __init__(self, pid, arrival_time, burst_time, memory_required):
+        self.pid = pid
+        self.arrival_time = arrival_time
+        self.burst_time = burst_time
+        self.memory_required = memory_required
+        self.start_time = None
+        self.completion_time = None
+
+# Memory Manager class for handling memory allocation and deallocation
+class MemoryManager:
+    def __init__(self, memory_size):
+        self.memory_size = memory_size
+        self.allocated = set()
+
+    def allocate(self, process, strategy):
+        if self.memory_size >= process.memory_required:
+            self.allocated.add(process.pid)
+            self.memory_size -= process.memory_required
+            return True
+        return False
+
+    def deallocate(self, pid):
+        self.allocated.remove(pid)
+        self.memory_size += next(p.memory_required for p in process_list if p.pid == pid)
+
+# Scheduler class for FCFS and SJF scheduling
+class Scheduler:
+    def __init__(self, memory_size, strategy):
+        self.memory_size = memory_size
+        self.strategy = strategy
+        self.memory_manager = MemoryManager(memory_size)
+
+    def simulate_fcfs(self, processes):
+        time = 0
+        completed = []
+        skipped = set()
+        queue = []
+        i = 0
+
+        while len(completed) + len(skipped) < len(processes):
+            while i < len(processes) and processes[i].arrival_time <= time:
+                queue.append(processes[i])
+                i += 1
+            if queue:
+                p = queue.pop(0)  # FCFS is based on arrival time, not burst time
+                if not self.memory_manager.allocate(p, self.strategy):
+                    print(f"Process {p.pid} skipped due to insufficient memory.")
+                    skipped.add(p.pid)
+                    continue
+                p.start_time = time
+                time += p.burst_time
+                p.completion_time = time
+                self.memory_manager.deallocate(p.pid)
+                completed.append(p)
+            else:
+                time += 1
+        return completed
+
+    def simulate_sjf(self, processes):
+        time = 0
+        completed = []
+        skipped = set()
+        queue = []
+        i = 0
+
+        while len(completed) + len(skipped) < len(processes):
+            while i < len(processes) and processes[i].arrival_time <= time:
+                heapq.heappush(queue, (processes[i].burst_time, processes[i]))
+                i += 1
+            if queue:
+                _, p = heapq.heappop(queue)  # SJF is based on burst time (shortest first)
+                if not self.memory_manager.allocate(p, self.strategy):
+                    print(f"Process {p.pid} skipped due to insufficient memory.")
+                    skipped.add(p.pid)
+                    continue
+                p.start_time = time
+                time += p.burst_time
+                p.completion_time = time
+                self.memory_manager.deallocate(p.pid)
+                completed.append(p)
+            else:
+                time += 1
+        return completed
+
+# Function to calculate and print waiting and turnaround times
+def calculate_metrics(processes):
+    total_waiting = 0
+    total_turnaround = 0
+
+    for p in processes:
+        turnaround = p.completion_time - p.arrival_time
+        waiting = turnaround - p.burst_time
+        total_turnaround += turnaround
+        total_waiting += waiting
+        print(f"Process {p.pid}: Waiting Time = {waiting}, Turnaround Time = {turnaround}")
+
+    n = len(processes)
+    print(f"\nAverage Waiting Time: {total_waiting / n:.2f}")
+    print(f"Average Turnaround Time: {total_turnaround / n:.2f}")
+
+# Example usage
+if __name__ == "__main__":
+    # List of processes
+    process_list = [
+        Process(pid=1, arrival_time=0, burst_time=5, memory_required=100),
+        Process(pid=2, arrival_time=2, burst_time=3, memory_required=150),
+        Process(pid=3, arrival_time=4, burst_time=1, memory_required=200),
+        Process(pid=4, arrival_time=6, burst_time=7, memory_required=100)
+    ]
+
+    # FCFS Scheduling
+    scheduler = Scheduler(memory_size=500, strategy='first_fit')
+    print("=== FCFS Scheduling ===")
+    completed_fcfs = scheduler.simulate_fcfs(process_list.copy())
+    calculate_metrics(completed_fcfs)
+
+    # SJF Scheduling
+    scheduler = Scheduler(memory_size=500, strategy='best_fit')
+    print("\n=== SJF Scheduling ===")
+    completed_sjf = scheduler.simulate_sjf(process_list.copy())
+    calculate_metrics(completed_sjf)
